@@ -1,0 +1,112 @@
+------------------------------------------------------------------------------------------------------
+# EVEN after multiple ways to enable truly background backup script on windows a powershell window would flash
+briefly and shift focus from the current window.
+the last resort i found was using vbscript.
+
+# contents of name_of_script.vbs
+
+Set objShell = CreateObject("Wscript.Shell")
+
+objShell.Run "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""C:\backup_tally_hourly.ps1""", 0, False
+
+#EOF
+
+now schedule this vs script as required using windows task scheduler.
+
+-------------------------------------------------------------------------------------------------------
+CONTENT OF THE ACTUAL BACKUP SCRIPT (USING POWERSHELL)
+-------------------------------------------------------------------------------------------------------
+# Define the source path and the backup folder name
+$sourcePath = "PATH_OF_DIRECTORY"  # Specify the directory to back up
+$backupFolderName = "Backup_" + (Get-Date -Format "yyyyMMdd_HHmmss")  # Backup folder name with timestamp
+$backupPath = "PATH_TO_BACKUP_FOLDER"  # Define the location where the backup will be created
+$tempBackupPath = "TEMPROARY_BACKUP_FOLDER"  # Temporary backup folder for robocopy
+$logFilePath = "PATH_TO_LOG_FILE"  # Path to the log file
+
+# Function to write log messages with timestamp
+function Write-Log {
+    param (
+        [string]$message
+    )
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logMessage = "$timestamp - $message"
+    
+    # Append the message to the log file and output to the console
+    Add-Content -Path $logFilePath -Value $logMessage
+    Write-Host $logMessage
+}
+
+# Create the backup folder name (ZIP file path)
+$backupZipName = $backupFolderName + ".zip"
+$backupZipPath = Join-Path -Path $backupPath -ChildPath $backupZipName
+
+# Log the start of the backup process
+Write-Log "Starting backup of '$sourcePath' using a temporary folder at '$tempBackupPath'"
+
+# Step 1: Use robocopy to copy files to a temporary folder
+try {
+    # Ensure the temporary backup folder exists
+    if (!(Test-Path -Path $tempBackupPath)) {
+        New-Item -Path $tempBackupPath -ItemType Directory | Out-Null
+    } else {
+        Remove-Item -Path "$tempBackupPath\*" -Recurse -Force | Out-Null
+    }
+    
+    # Run robocopy to copy files (including locked files)
+    robocopy $sourcePath $tempBackupPath /E /COPY:DAT /R:3 /W:5 /LOG+:$logFilePath /NFL /NDL /NP
+    
+    Write-Log "Files copied successfully to temporary folder."
+} catch {
+    # Capture and log the error
+    $errorMessage = $_.Exception.Message
+    Write-Log "Error during robocopy: $errorMessage"
+    exit
+}
+
+# Step 2: Compress the temporary folder into a ZIP file
+try {
+    Compress-Archive -Path "$tempBackupPath\*" -DestinationPath $backupZipPath -Force
+    Write-Log "Backup folder '$tempBackupPath' compressed into ZIP file '$backupZipPath'"
+} catch {
+    # Capture and log the error
+    $errorMessage = $_.Exception.Message
+    Write-Log "Error during compression: $errorMessage"
+    exit
+}
+
+# Step 3: Clean up the temporary folder
+try {
+    Remove-Item -Path "$tempBackupPath\*" -Recurse -Force
+    Write-Log "Temporary folder cleaned up successfully."
+} catch {
+    $errorMessage = $_.Exception.Message
+    Write-Log "Error during temporary folder cleanup: $errorMessage"
+}
+
+# Step 4: Delete older backups if the number of backups exceeds 6
+try {
+    $backupZips = Get-ChildItem -Path $backupPath -Filter "*.zip" | Sort-Object CreationTime
+
+    # Check if the number of backups is greater than 6
+    if ($backupZips.Count -gt 6) {
+        # Find the oldest backup ZIP files to delete
+        $zipsToDelete = $backupZips | Select-Object -First ($backupZips.Count - 6)
+
+        # Log the deletion of old backups
+        Write-Log "Number of backups exceeds 6, deleting older backup ZIP files."
+
+        # Delete the older backup ZIP files
+        foreach ($zip in $zipsToDelete) {
+            Write-Log "Deleting backup ZIP file: $($zip.FullName)"
+            Remove-Item -Path $zip.FullName -Force
+        }
+    }
+} catch {
+    # Capture and log any errors during cleanup
+    $errorMessage = $_.Exception.Message
+    Write-Log "Error during cleanup of old backups: $errorMessage"
+}
+
+# Final log message
+Write-Log "Backup process completed."
